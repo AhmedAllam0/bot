@@ -8,6 +8,9 @@ import { z } from "zod";
 
 import { sharedPostgresStorage } from "./storage";
 import { inngest, inngestServe } from "./inngest";
+import { bookSearchAgent } from "./agents/bookSearchAgent";
+import { bookSearchWorkflow } from "./workflows/bookSearchWorkflow";
+import { registerTelegramTrigger } from "../triggers/telegramTriggers";
 
 // ======================================================================
 // Option 1: FOR TIME-BASED (CRON) TRIGGERS
@@ -118,9 +121,13 @@ class ProductionPinoLogger extends MastraLogger {
 export const mastra = new Mastra({
   storage: sharedPostgresStorage,
   // Register your workflows here
-  workflows: {},
+  workflows: {
+    [bookSearchWorkflow.id]: bookSearchWorkflow,
+  },
   // Register your agents here
-  agents: {},
+  agents: {
+    "book-search-agent": bookSearchAgent,
+  },
   bundler: {
     // A few dependencies are not properly picked up by
     // the bundler if they are not added directly to the
@@ -177,8 +184,36 @@ export const mastra = new Mastra({
         createHandler: async ({ mastra }) => inngestServe({ mastra, inngest }),
       },
 
-      // Add webhook triggers here (see Option 2 above)
-      // Example: ...registerSlackTrigger({ ... })
+      // Telegram Webhook Trigger
+      ...registerTelegramTrigger({
+        triggerType: "telegram/message",
+        handler: async (mastra, triggerInfo) => {
+          const logger = mastra.getLogger();
+          logger?.info("📨 [Telegram Trigger] رسالة جديدة:", {
+            chatId: triggerInfo.params.chatId,
+            userId: triggerInfo.params.userId,
+            message: triggerInfo.params.message.substring(0, 50),
+          });
+
+          const run = await bookSearchWorkflow.createRunAsync();
+          
+          logger?.info("🚀 [Telegram Trigger] بدء Workflow:", { runId: run?.runId });
+          
+          await inngest.send({
+            name: `workflow.${bookSearchWorkflow.id}`,
+            data: {
+              runId: run?.runId,
+              inputData: {
+                chatId: triggerInfo.params.chatId,
+                userId: triggerInfo.params.userId,
+                userName: triggerInfo.params.userName,
+                message: triggerInfo.params.message,
+                messageId: triggerInfo.params.messageId,
+              },
+            },
+          });
+        },
+      }),
     ],
   },
   logger:

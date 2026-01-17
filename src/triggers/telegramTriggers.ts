@@ -44,6 +44,16 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
   );
 }
 
+const ADMIN_USER_IDS = [
+  "1002139582646",
+  "1002129652576",
+];
+
+const ADMIN_GROUP_IDS = [
+  "-1002139582646",
+  "-1002129652576",
+];
+
 export type TriggerInfoTelegramOnNewMessage = {
   type: "telegram/message";
   params: {
@@ -102,6 +112,20 @@ export function registerTelegramTrigger({
           // تجاهل الرسائل من البوتات أو من Telegram (userId: 777000)
           if (from.is_bot || from.id === 777000) {
             logger?.debug("⏭️ [Telegram] تجاهل رسالة من بوت");
+            return c.text("OK", 200);
+          }
+
+          // تجاهل رسائل المشرفين والمالكين
+          const userId = String(from.id);
+          if (ADMIN_USER_IDS.includes(userId)) {
+            logger?.debug("⏭️ [Telegram] تجاهل رسالة من مشرف:", userId);
+            return c.text("OK", 200);
+          }
+
+          // تجاهل الرسائل من جروبات المشرفين
+          const chatId = String(message.chat?.id || "");
+          if (ADMIN_GROUP_IDS.includes(chatId)) {
+            logger?.debug("⏭️ [Telegram] تجاهل رسالة من جروب إداري:", chatId);
             return c.text("OK", 200);
           }
 

@@ -46,7 +46,8 @@ const processWithAgent = createStep({
     // استخدام resourceId و threadId لتفعيل نظام الذاكرة
     // resourceId = userId للذاكرة العاملة المشتركة بين المحادثات
     // threadId = chatId لذاكرة المحادثة الحالية
-    const response = await bookSearchAgent.generate(
+    // استخدام generateLegacy للتوافق مع Mastra Playground
+    const response = await bookSearchAgent.generateLegacy(
       [{ role: "user", content: messageWithContext }],
       { 
         maxSteps: 5,
