@@ -117,7 +117,7 @@ export function registerTelegramTrigger({
               if (member.is_bot) continue;
               
               const firstName = escapeHtml(member.first_name || "صديق");
-              const welcomeMessage = `🎉 أهلاً وسهلاً <b>${firstName}</b>!\n\n📚 مرحباً بك في <b>خلاصة الكتب</b>\n\n✨ اكتب اسم أي كتاب وسأجد لك رابط تحميله أو أرسله لك مباشرة!\n\n💡 جرب: "كتاب الأمير" أو "رواية الفيل الأزرق"`;
+              const welcomeMessage = `🎉 أهلاً وسهلاً <b>${firstName}</b>!\n\n📚 مرحباً بك في <b>خلاصة الكتب</b>\n\n✨ اكتب اسم أي كتاب وسأرسل لك الملف مباشرة هنا 🎯!`;
               
               try {
                 const response = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
