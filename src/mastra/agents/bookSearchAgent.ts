@@ -23,6 +23,7 @@ import { cacheBookSearch, getCachedBook, getPopularBooks } from "../tools/bookCa
 import { subscribeToNotifications, getMySubscriptions, unsubscribeFromNotifications } from "../tools/notifications";
 import { advancedBookSearch, getReadingStatistics, getTopBooksThisWeek } from "../tools/advancedSearch";
 import { getLeaderboard } from "../tools/leaderboard";
+import { getStartMessage, getHelpMessage, getQuotesMessage } from "../tools/commands";
 
 const openai = createOpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -176,21 +177,21 @@ export const bookSearchAgent = new Agent({
 📚 قاعدة ذهبية: عندما يطلب شخص كتاب أو رواية، أرسل له ملف PDF مباشرة باستخدام send_book_pdf!
 - إذا لم يتوفر PDF، أخبره واستخدم find_book_download_link لإعطائه روابط التحميل
 
-🔧 أوامر البوت (تبدأ بـ /):
-- /start → رسالة الترحيب وتعرف على المميزات
-- /help → دليل المساعدة ونظام النقاط
-- /search اسم_الكتاب → بحث عن كتاب وإرسال PDF
-- /recommend → ترشيحات ذكية تناسب ذوقك
-- /summary اسم_الكتاب → ملخص شامل لأي كتاب
-- /author اسم_المؤلف → معلومات المؤلف
-- /favorites → عرض قائمتك المفضلة
-- /quotes → اقتباسات وحكم ملهمة
-- /stats → عرض إحصائياتك ونقاطك
-- /leaderboard → عرض قائمة المتصدرين
-- /checkin → تسجيل الدخول اليومي
-- /referral → كود الإحالة الخاص بك
-- /claim → المطالبة بمكافأة اللقب
-- /engagement → إحصائيات التفاعل الشاملة
+🔧 أوامر البوت (تبدأ بـ /) - استخدم الأداة المحددة مباشرة:
+- /start → get_start_message (رسالة الترحيب)
+- /help أو /مساعدة → get_help_message (دليل شامل)
+- /search اسم_الكتاب أو /بحث → send_book_pdf (بحث وإرسال PDF)
+- /recommend أو /توصيات → get_book_recommendations (ترشيحات كتب)
+- /summary اسم_الكتاب أو /ملخص → get_book_summary (ملخص الكتاب)
+- /author اسم_المؤلف أو /مؤلف → get_author_info (معلومات المؤلف)
+- /favorites أو /مفضلة → get_favorites (عرض المفضلة)
+- /quotes أو /اقتباسات → get_quotes_message (اقتباسات ملهمة)
+- /stats أو /إحصائياتي → get_reading_statistics (إحصائيات القراءة)
+- /leaderboard أو /المتصدرين → get_leaderboard (قائمة المتصدرين)
+- /checkin أو /تسجيل → checkin_daily (الدخول اليومي)
+- /referral أو /إحالة → get_referral_code (كود الإحالة)
+- /claim أو /مكافأة → claim_reward (المطالبة بمكافأة)
+- /engagement أو /تفاعل → get_engagement_stats (إحصائيات التفاعل)
 
 🏆 نظام الألقاب والنقاط:
 
@@ -358,6 +359,9 @@ export const bookSearchAgent = new Agent({
     get_reading_statistics: getReadingStatistics,
     get_top_books_this_week: getTopBooksThisWeek,
     get_leaderboard: getLeaderboard,
+    get_start_message: getStartMessage,
+    get_help_message: getHelpMessage,
+    get_quotes_message: getQuotesMessage,
   },
 
   // نظام الذاكرة القوي - يتذكر المحادثات وتفضيلات المستخدم
