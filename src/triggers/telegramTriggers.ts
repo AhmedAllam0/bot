@@ -129,6 +129,17 @@ export function registerTelegramTrigger({
             return c.text("OK", 200);
           }
 
+          // للـ callback_query: استخدم callback_data كرسالة
+          // للرسائل العادية: استخدم نص الرسالة
+          const messageText = payload.callback_query?.data || message.text || "";
+          
+          logger?.info("📨 [Telegram Trigger] رسالة جديدة:", {
+            chatId: String(message.chat?.id || ""),
+            userId: String(from.id || ""),
+            message: messageText.substring(0, 50),
+            isCallback: !!payload.callback_query,
+          });
+
           await handler(mastra, {
             type: triggerType,
             params: {
@@ -136,7 +147,7 @@ export function registerTelegramTrigger({
               userId: String(from.id || ""),
               userName: from.username || "unknown",
               firstName: from.first_name || "مستخدم",
-              message: message.text || payload.callback_query?.data || "",
+              message: messageText,
               messageId: message.message_id || 0,
             },
             payload,
