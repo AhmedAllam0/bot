@@ -1,0 +1,736 @@
+import { createTool } from "@mastra/core/tools";
+import { z } from "zod";
+import { sharedPool as pool } from "../db/pool";
+
+const GROUP_ID = "-1002129652576";
+const DAILY_GROUP_POINTS_LIMIT = 20;
+const POINTS_PER_MESSAGE = 2;
+const DAILY_CHECKIN_POINTS = 5;
+const STREAK_7_BONUS = 20;
+const STREAK_30_BONUS = 100;
+const REFERRER_POINTS = 50;
+const REFEREE_POINTS = 25;
+const ADMIN_CHAT_ID = "-1002139582646";
+
+const TITLE_REWARDS = [
+  { name: "مثقف", min_points: 300, reward: "شهادة رقمية" },
+  { name: "عالم", min_points: 1000, reward: "Canva Pro أسبوع" },
+  { name: "فيلسوف", min_points: 2500, reward: "Canva Pro شهر" },
+  { name: "عبقري", min_points: 6000, reward: "Canva Pro 3 شهور" },
+  { name: "خالد", min_points: 10000, reward: "مكافأة خاصة" },
+];
+
+function generateReferralCode(): string {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let code = "ref_";
+  for (let i = 0; i < 5; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
+}
+
+async function ensureUserExists(telegramId: number, username?: string, firstName?: string): Promise<number> {
+  let userResult = await pool.query(
+    "SELECT id, username, first_name FROM competition_users WHERE telegram_id = $1",
+    [telegramId]
+  );
+
+  if (userResult.rows.length === 0) {
+    const referralCode = generateReferralCode();
+    await pool.query(
+      `INSERT INTO competition_users (telegram_id, username, first_name, total_points, title_id, referral_code, daily_streak)
+       VALUES ($1, $2, $3, 0, 1, $4, 0)`,
+      [telegramId, username || null, firstName || null, referralCode]
+    );
+    userResult = await pool.query(
+      "SELECT id FROM competition_users WHERE telegram_id = $1",
+      [telegramId]
+    );
+  } else {
+    // تحديث اسم المستخدم إذا تغير
+    const currentUser = userResult.rows[0];
+    const shouldUpdate = (firstName && firstName !== currentUser.first_name && firstName !== "مستخدم") ||
+                        (username && username !== currentUser.username && username !== "unknown");
+    
+    if (shouldUpdate) {
+      await pool.query(
+        `UPDATE competition_users SET 
+         username = COALESCE($1, username),
+         first_name = COALESCE($2, first_name)
+         WHERE telegram_id = $3`,
+        [username && username !== "unknown" ? username : null, 
+         firstName && firstName !== "مستخدم" ? firstName : null, 
+         telegramId]
+      );
+    }
+  }
+
+  return userResult.rows[0].id;
+}
+
+export const awardGroupActivityPoints = createTool({
+  id: "award-group-activity-points",
+  description: "يمنح نقاط للمستخدم عند إرسال رسائل في الجروب. +2 نقطة لكل رسالة بحد أقصى 20 نقطة يومياً.",
+  inputSchema: z.object({
+    telegramId: z.number().describe("معرف المستخدم على تيليجرام"),
+    chatId: z.string().describe("معرف المحادثة/الجروب"),
+    username: z.string().optional().describe("اسم المستخدم"),
+    firstName: z.string().optional().describe("الاسم الأول"),
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    pointsAwarded: z.number().optional(),
+    totalDailyPoints: z.number().optional(),
+    remainingDailyPoints: z.number().optional(),
+    message: z.string(),
+  }),
+  execute: async ({ context, mastra }) => {
+    const logger = mastra?.getLogger();
+    logger?.info("📊 [Engagement] تسجيل نشاط الجروب:", { telegramId: context.telegramId, chatId: context.chatId });
+
+    if (!process.env.DATABASE_URL) {
+      return { success: false, pointsAwarded: 0, message: "خطأ في إعدادات قاعدة البيانات" };
+    }
+
+    if (context.chatId !== GROUP_ID) {
+      logger?.info("📊 [Engagement] ليس الجروب المستهدف:", context.chatId);
+      return { success: false, pointsAwarded: 0, message: "هذه الميزة متاحة فقط في الجروب الرسمي" };
+    }
+
+    try {
+      const userId = await ensureUserExists(context.telegramId, context.username, context.firstName);
+
+      const today = new Date().toISOString().split('T')[0];
+      let activityResult = await pool.query(
+        "SELECT * FROM daily_activity WHERE telegram_id = $1 AND activity_date = $2",
+        [context.telegramId, today]
+      );
+
+      let currentDailyPoints = 0;
+      let messageCount = 0;
+
+      if (activityResult.rows.length === 0) {
+        await pool.query(
+          `INSERT INTO daily_activity (user_id, telegram_id, activity_date, group_messages, group_points_earned)
+           VALUES ($1, $2, $3, 1, $4)`,
+          [userId, context.telegramId, today, POINTS_PER_MESSAGE]
+        );
+        currentDailyPoints = POINTS_PER_MESSAGE;
+        messageCount = 1;
+      } else {
+        currentDailyPoints = activityResult.rows[0].group_points_earned;
+        messageCount = activityResult.rows[0].group_messages;
+
+        if (currentDailyPoints >= DAILY_GROUP_POINTS_LIMIT) {
+          logger?.info("📊 [Engagement] وصل الحد اليومي:", currentDailyPoints);
+          return {
+            success: true,
+            pointsAwarded: 0,
+            totalDailyPoints: currentDailyPoints,
+            remainingDailyPoints: 0,
+            message: "🎉 لقد وصلت للحد الأقصى اليومي (20 نقطة)! عد غداً لمزيد من النقاط.",
+          };
+        }
+
+        const newPoints = Math.min(currentDailyPoints + POINTS_PER_MESSAGE, DAILY_GROUP_POINTS_LIMIT);
+        const actualPointsAwarded = newPoints - currentDailyPoints;
+
+        await pool.query(
+          `UPDATE daily_activity 
+           SET group_messages = $1, group_points_earned = $2
+           WHERE telegram_id = $3 AND activity_date = $4`,
+          [messageCount + 1, newPoints, context.telegramId, today]
+        );
+
+        currentDailyPoints = newPoints;
+        messageCount += 1;
+      }
+
+      await pool.query(
+        `UPDATE competition_users SET total_points = total_points + $1 WHERE telegram_id = $2`,
+        [POINTS_PER_MESSAGE, context.telegramId]
+      );
+
+      const remainingPoints = DAILY_GROUP_POINTS_LIMIT - currentDailyPoints;
+
+      logger?.info("✅ [Engagement] تم منح النقاط:", { currentDailyPoints, remainingPoints });
+
+      return {
+        success: true,
+        pointsAwarded: POINTS_PER_MESSAGE,
+        totalDailyPoints: currentDailyPoints,
+        remainingDailyPoints: remainingPoints,
+        message: `+${POINTS_PER_MESSAGE} نقطة! 📊 مجموع اليوم: ${currentDailyPoints}/${DAILY_GROUP_POINTS_LIMIT}`,
+      };
+    } catch (error) {
+      logger?.error("❌ [Engagement] خطأ:", error);
+      return { success: false, pointsAwarded: 0, message: "حدث خطأ في تسجيل النشاط" };
+    }
+  },
+});
+
+export const checkInDaily = createTool({
+  id: "checkin-daily",
+  description: "تسجيل الدخول اليومي للحصول على نقاط. +5 نقاط يومياً مع مكافآت إضافية للسلسلة المتتالية.",
+  inputSchema: z.object({
+    telegramId: z.number().describe("معرف المستخدم على تيليجرام"),
+    username: z.string().optional().describe("اسم المستخدم"),
+    firstName: z.string().optional().describe("الاسم الأول"),
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    pointsAwarded: z.number().optional(),
+    currentStreak: z.number().optional(),
+    bonusAwarded: z.number().optional(),
+    message: z.string(),
+  }),
+  execute: async ({ context, mastra }) => {
+    const logger = mastra?.getLogger();
+    logger?.info("📅 [Engagement] تسجيل دخول يومي:", context.telegramId);
+
+    if (!process.env.DATABASE_URL) {
+      return { success: false, message: "خطأ في إعدادات قاعدة البيانات" };
+    }
+
+    try {
+      await ensureUserExists(context.telegramId, context.username, context.firstName);
+
+      const userResult = await pool.query(
+        "SELECT * FROM competition_users WHERE telegram_id = $1",
+        [context.telegramId]
+      );
+      const user = userResult.rows[0];
+
+      const today = new Date().toISOString().split('T')[0];
+      const lastCheckin = user.last_checkin ? new Date(user.last_checkin).toISOString().split('T')[0] : null;
+
+      if (lastCheckin === today) {
+        return {
+          success: false,
+          currentStreak: user.daily_streak,
+          message: `✅ لقد سجلت دخولك اليوم بالفعل!\n🔥 سلسلتك الحالية: <b>${user.daily_streak}</b> يوم`,
+        };
+      }
+
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayStr = yesterday.toISOString().split('T')[0];
+
+      let newStreak = 1;
+      if (lastCheckin === yesterdayStr) {
+        newStreak = user.daily_streak + 1;
+      }
+
+      let bonusPoints = 0;
+      let bonusMessage = "";
+
+      if (newStreak === 7) {
+        bonusPoints = STREAK_7_BONUS;
+        bonusMessage = `\n🎉 <b>مكافأة أسبوع!</b> +${STREAK_7_BONUS} نقطة إضافية!`;
+      } else if (newStreak === 30) {
+        bonusPoints = STREAK_30_BONUS;
+        bonusMessage = `\n🏆 <b>مكافأة شهر كامل!</b> +${STREAK_30_BONUS} نقطة إضافية!`;
+      } else if (newStreak % 30 === 0) {
+        bonusPoints = STREAK_30_BONUS;
+        bonusMessage = `\n🏆 <b>مكافأة ${newStreak} يوم!</b> +${STREAK_30_BONUS} نقطة إضافية!`;
+      } else if (newStreak % 7 === 0) {
+        bonusPoints = STREAK_7_BONUS;
+        bonusMessage = `\n🎉 <b>مكافأة ${newStreak} يوم!</b> +${STREAK_7_BONUS} نقطة إضافية!`;
+      }
+
+      const totalPoints = DAILY_CHECKIN_POINTS + bonusPoints;
+
+      await pool.query(
+        `UPDATE competition_users 
+         SET total_points = total_points + $1,
+             daily_streak = $2,
+             last_checkin = $3
+         WHERE telegram_id = $4`,
+        [totalPoints, newStreak, today, context.telegramId]
+      );
+
+      const today2 = new Date().toISOString().split('T')[0];
+      await pool.query(
+        `INSERT INTO daily_activity (user_id, telegram_id, activity_date, daily_checkin)
+         VALUES ($1, $2, $3, true)
+         ON CONFLICT (telegram_id, activity_date) 
+         DO UPDATE SET daily_checkin = true`,
+        [user.id, context.telegramId, today2]
+      );
+
+      logger?.info("✅ [Engagement] تم تسجيل الدخول:", { newStreak, totalPoints });
+
+      let streakEmoji = "🔥";
+      if (newStreak >= 30) streakEmoji = "🏆";
+      else if (newStreak >= 14) streakEmoji = "⭐";
+      else if (newStreak >= 7) streakEmoji = "🌟";
+
+      return {
+        success: true,
+        pointsAwarded: DAILY_CHECKIN_POINTS,
+        currentStreak: newStreak,
+        bonusAwarded: bonusPoints,
+        message: `✅ <b>تم تسجيل دخولك اليومي!</b>
+
++${DAILY_CHECKIN_POINTS} نقطة ${streakEmoji}
+${streakEmoji} <b>سلسلة:</b> ${newStreak} يوم متتالي${bonusMessage}
+
+💡 <i>استمر بتسجيل الدخول يومياً للحصول على مكافآت!</i>`,
+      };
+    } catch (error) {
+      logger?.error("❌ [Engagement] خطأ:", error);
+      return { success: false, message: "حدث خطأ في تسجيل الدخول" };
+    }
+  },
+});
+
+export const getReferralCode = createTool({
+  id: "get-referral-code",
+  description: "الحصول على كود الإحالة الخاص بالمستخدم أو إنشاء كود جديد.",
+  inputSchema: z.object({
+    telegramId: z.number().describe("معرف المستخدم على تيليجرام"),
+    username: z.string().optional().describe("اسم المستخدم"),
+    firstName: z.string().optional().describe("الاسم الأول"),
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    referralCode: z.string().optional(),
+    totalReferrals: z.number().optional(),
+    message: z.string(),
+  }),
+  execute: async ({ context, mastra }) => {
+    const logger = mastra?.getLogger();
+    logger?.info("🔗 [Engagement] جلب كود الإحالة:", context.telegramId);
+
+    if (!process.env.DATABASE_URL) {
+      return { success: false, message: "خطأ في إعدادات قاعدة البيانات" };
+    }
+
+    try {
+      await ensureUserExists(context.telegramId, context.username, context.firstName);
+
+      let userResult = await pool.query(
+        "SELECT referral_code, total_referrals FROM competition_users WHERE telegram_id = $1",
+        [context.telegramId]
+      );
+
+      let referralCode = userResult.rows[0].referral_code;
+      const totalReferrals = userResult.rows[0].total_referrals || 0;
+
+      if (!referralCode) {
+        referralCode = generateReferralCode();
+        await pool.query(
+          "UPDATE competition_users SET referral_code = $1 WHERE telegram_id = $2",
+          [referralCode, context.telegramId]
+        );
+        logger?.info("🔗 [Engagement] تم إنشاء كود جديد:", referralCode);
+      }
+
+      return {
+        success: true,
+        referralCode,
+        totalReferrals,
+        message: `<b>🔗 كود الإحالة الخاص بك:</b>
+
+<code>${referralCode}</code>
+
+📊 <b>إحالاتك:</b> ${totalReferrals} شخص
+
+<b>🎁 المكافآت:</b>
+• أنت تحصل على <b>+50 نقطة</b> لكل صديق
+• صديقك يحصل على <b>+25 نقطة</b>
+
+💡 <i>شارك الكود مع أصدقائك!</i>`,
+      };
+    } catch (error) {
+      logger?.error("❌ [Engagement] خطأ:", error);
+      return { success: false, message: "حدث خطأ في جلب كود الإحالة" };
+    }
+  },
+});
+
+export const processReferral = createTool({
+  id: "process-referral",
+  description: "معالجة كود الإحالة عند انضمام مستخدم جديد.",
+  inputSchema: z.object({
+    referralCode: z.string().describe("كود الإحالة"),
+    refereeTelegramId: z.number().describe("معرف المستخدم الجديد (المُحال)"),
+    refereeUsername: z.string().optional().describe("اسم المستخدم الجديد"),
+    refereeFirstName: z.string().optional().describe("الاسم الأول للمستخدم الجديد"),
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    referrerPoints: z.number().optional(),
+    refereePoints: z.number().optional(),
+    message: z.string(),
+  }),
+  execute: async ({ context, mastra }) => {
+    const logger = mastra?.getLogger();
+    logger?.info("🎯 [Engagement] معالجة إحالة:", { code: context.referralCode, referee: context.refereeTelegramId });
+
+    if (!process.env.DATABASE_URL) {
+      return { success: false, message: "خطأ في إعدادات قاعدة البيانات" };
+    }
+
+    try {
+      const existingReferral = await pool.query(
+        "SELECT * FROM referrals WHERE referee_telegram_id = $1",
+        [context.refereeTelegramId]
+      );
+
+      if (existingReferral.rows.length > 0) {
+        return {
+          success: false,
+          message: "⚠️ لقد استخدمت كود إحالة من قبل. لا يمكن استخدام أكثر من كود واحد.",
+        };
+      }
+
+      const referrerResult = await pool.query(
+        "SELECT telegram_id, first_name FROM competition_users WHERE referral_code = $1",
+        [context.referralCode]
+      );
+
+      if (referrerResult.rows.length === 0) {
+        return {
+          success: false,
+          message: "❌ كود الإحالة غير صالح. تأكد من الكود وحاول مرة أخرى.",
+        };
+      }
+
+      const referrer = referrerResult.rows[0];
+
+      if (referrer.telegram_id === context.refereeTelegramId) {
+        return {
+          success: false,
+          message: "❌ لا يمكنك استخدام كود الإحالة الخاص بك!",
+        };
+      }
+
+      await ensureUserExists(context.refereeTelegramId, context.refereeUsername, context.refereeFirstName);
+
+      await pool.query(
+        `INSERT INTO referrals (referrer_telegram_id, referee_telegram_id, referral_code, points_awarded)
+         VALUES ($1, $2, $3, true)`,
+        [referrer.telegram_id, context.refereeTelegramId, context.referralCode]
+      );
+
+      await pool.query(
+        `UPDATE competition_users 
+         SET total_points = total_points + $1,
+             total_referrals = total_referrals + 1
+         WHERE telegram_id = $2`,
+        [REFERRER_POINTS, referrer.telegram_id]
+      );
+
+      await pool.query(
+        `UPDATE competition_users SET total_points = total_points + $1 WHERE telegram_id = $2`,
+        [REFEREE_POINTS, context.refereeTelegramId]
+      );
+
+      logger?.info("✅ [Engagement] تمت الإحالة بنجاح:", { referrer: referrer.telegram_id, referee: context.refereeTelegramId });
+
+      return {
+        success: true,
+        referrerPoints: REFERRER_POINTS,
+        refereePoints: REFEREE_POINTS,
+        message: `🎉 <b>تم تفعيل كود الإحالة بنجاح!</b>
+
+✅ حصلت على <b>+${REFEREE_POINTS} نقطة</b> كهدية ترحيبية!
+✅ حصل <b>${referrer.first_name || 'صديقك'}</b> على <b>+${REFERRER_POINTS} نقطة</b>
+
+💡 <i>أنشئ كود الإحالة الخاص بك وادعُ أصدقائك!</i>`,
+      };
+    } catch (error) {
+      logger?.error("❌ [Engagement] خطأ:", error);
+      return { success: false, message: "حدث خطأ في معالجة الإحالة" };
+    }
+  },
+});
+
+export const getUserEngagementStats = createTool({
+  id: "get-user-engagement-stats",
+  description: "عرض إحصائيات التفاعل الشاملة للمستخدم: السلسلة اليومية، نقاط الجروب، الإحالات، والمكافآت.",
+  inputSchema: z.object({
+    telegramId: z.number().describe("معرف المستخدم على تيليجرام"),
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    stats: z.object({
+      dailyStreak: z.number(),
+      todayGroupPoints: z.number(),
+      totalReferrals: z.number(),
+      referralCode: z.string(),
+      lastCheckin: z.string().nullable(),
+      checkedInToday: z.boolean(),
+      availableRewards: z.array(z.string()),
+    }).optional(),
+    message: z.string(),
+  }),
+  execute: async ({ context, mastra }) => {
+    const logger = mastra?.getLogger();
+    logger?.info("📈 [Engagement] جلب إحصائيات التفاعل:", context.telegramId);
+
+    if (!process.env.DATABASE_URL) {
+      return { success: false, message: "خطأ في إعدادات قاعدة البيانات" };
+    }
+
+    try {
+      await ensureUserExists(context.telegramId);
+
+      const userResult = await pool.query(
+        `SELECT daily_streak, total_referrals, referral_code, last_checkin, 
+                total_points, rewards_claimed
+         FROM competition_users WHERE telegram_id = $1`,
+        [context.telegramId]
+      );
+
+      if (userResult.rows.length === 0) {
+        return { success: false, message: "المستخدم غير موجود" };
+      }
+
+      const user = userResult.rows[0];
+      const today = new Date().toISOString().split('T')[0];
+
+      const activityResult = await pool.query(
+        "SELECT group_points_earned, daily_checkin FROM daily_activity WHERE telegram_id = $1 AND activity_date = $2",
+        [context.telegramId, today]
+      );
+
+      const todayGroupPoints = activityResult.rows.length > 0 ? activityResult.rows[0].group_points_earned : 0;
+      const checkedInToday = activityResult.rows.length > 0 ? activityResult.rows[0].daily_checkin : false;
+
+      const lastCheckinStr = user.last_checkin ? new Date(user.last_checkin).toISOString().split('T')[0] : null;
+
+      const TITLES = [
+        { name: "مثقف", min_points: 300, reward: "شهادة رقمية" },
+        { name: "عالم", min_points: 1000, reward: "Canva Pro أسبوع" },
+        { name: "فيلسوف", min_points: 2500, reward: "Canva Pro شهر" },
+        { name: "عبقري", min_points: 6000, reward: "Canva Pro 3 شهور" },
+        { name: "خالد", min_points: 10000, reward: "مكافأة خاصة" },
+      ];
+
+      const claimedRewards = user.rewards_claimed ? user.rewards_claimed.split(',') : [];
+      const availableRewards: string[] = [];
+
+      for (const title of TITLES) {
+        if (user.total_points >= title.min_points && !claimedRewards.includes(title.name)) {
+          availableRewards.push(`${title.name}: ${title.reward}`);
+        }
+      }
+
+      logger?.info("✅ [Engagement] تم جلب الإحصائيات");
+
+      let streakEmoji = "🔥";
+      if (user.daily_streak >= 30) streakEmoji = "🏆";
+      else if (user.daily_streak >= 14) streakEmoji = "⭐";
+      else if (user.daily_streak >= 7) streakEmoji = "🌟";
+
+      const remainingGroupPoints = DAILY_GROUP_POINTS_LIMIT - todayGroupPoints;
+
+      let message = `<b>📈 إحصائيات التفاعل</b>
+
+${streakEmoji} <b>سلسلة الدخول:</b> ${user.daily_streak} يوم
+${checkedInToday ? '✅' : '⏰'} <b>الدخول اليومي:</b> ${checkedInToday ? 'تم اليوم' : 'لم يتم بعد'}
+
+📊 <b>نقاط الجروب اليوم:</b> ${todayGroupPoints}/${DAILY_GROUP_POINTS_LIMIT}
+${remainingGroupPoints > 0 ? `💡 متبقي: ${remainingGroupPoints} نقطة` : '🎉 وصلت للحد الأقصى!'}
+
+🔗 <b>الإحالات:</b> ${user.total_referrals} شخص
+<code>${user.referral_code || 'لم يتم إنشاء كود بعد'}</code>`;
+
+      if (availableRewards.length > 0) {
+        message += `\n\n🎁 <b>مكافآت متاحة للمطالبة:</b>\n${availableRewards.map(r => `• ${r}`).join('\n')}`;
+      }
+
+      return {
+        success: true,
+        stats: {
+          dailyStreak: user.daily_streak,
+          todayGroupPoints,
+          totalReferrals: user.total_referrals,
+          referralCode: user.referral_code || '',
+          lastCheckin: lastCheckinStr,
+          checkedInToday,
+          availableRewards,
+        },
+        message,
+      };
+    } catch (error) {
+      logger?.error("❌ [Engagement] خطأ:", error);
+      return { success: false, message: "حدث خطأ في جلب الإحصائيات" };
+    }
+  },
+});
+
+export const claimReward = createTool({
+  id: "claim-reward",
+  description: "المطالبة بمكافأة متاحة للمستخدم. إذا لم يتم تحديد rewardTitle، يعرض المكافآت المتاحة للمطالبة.",
+  inputSchema: z.object({
+    telegramId: z.number().describe("معرف المستخدم على تيليجرام"),
+    rewardTitle: z.string().optional().describe("اسم اللقب للمكافأة (مثقف، عالم، فيلسوف، عبقري، خالد) - اختياري"),
+    username: z.string().optional().describe("اسم المستخدم"),
+    firstName: z.string().optional().describe("الاسم الأول"),
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    reward: z.string().optional(),
+    message: z.string(),
+  }),
+  execute: async ({ context, mastra }) => {
+    const logger = mastra?.getLogger();
+    logger?.info("🎁 [Engagement] طلب مكافأة:", { telegramId: context.telegramId, title: context.rewardTitle });
+
+    if (!process.env.DATABASE_URL) {
+      return { success: false, message: "خطأ في إعدادات قاعدة البيانات" };
+    }
+
+    try {
+      const userResult = await pool.query(
+        "SELECT total_points, rewards_claimed, first_name, username FROM competition_users WHERE telegram_id = $1",
+        [context.telegramId]
+      );
+
+      if (userResult.rows.length === 0) {
+        return {
+          success: false,
+          message: "❌ لم يتم العثور على حسابك. جرب المشاركة في المسابقة أولاً.",
+        };
+      }
+
+      const user = userResult.rows[0];
+      const claimedRewards = user.rewards_claimed ? user.rewards_claimed.split(',') : [];
+
+      // إذا لم يتم تحديد لقب، عرض المكافآت المتاحة
+      if (!context.rewardTitle) {
+        const availableRewards: string[] = [];
+        let nextReward = null;
+        
+        for (const title of TITLE_REWARDS) {
+          if (user.total_points >= title.min_points && !claimedRewards.includes(title.name)) {
+            availableRewards.push(`🎁 <b>${title.name}</b>: ${title.reward}`);
+          } else if (user.total_points < title.min_points && !nextReward) {
+            nextReward = title;
+          }
+        }
+        
+        const currentTitle = user.total_points >= 10000 ? "خالد" :
+                            user.total_points >= 6000 ? "عبقري" :
+                            user.total_points >= 2500 ? "فيلسوف" :
+                            user.total_points >= 1500 ? "حكيم" :
+                            user.total_points >= 1000 ? "عالم" :
+                            user.total_points >= 600 ? "أديب" :
+                            user.total_points >= 300 ? "مثقف" :
+                            user.total_points >= 100 ? "قارئ" : "مبتدئ";
+        
+        if (availableRewards.length > 0) {
+          return {
+            success: true,
+            message: `🎁 <b>المكافآت المتاحة للمطالبة</b>
+
+${availableRewards.join('\n')}
+
+📊 <b>نقاطك:</b> ${user.total_points} نقطة
+🏆 <b>لقبك:</b> ${currentTitle}
+
+💡 لطلب مكافأة، أرسل: <code>/claim اسم_اللقب</code>
+مثال: <code>/claim مثقف</code>`,
+          };
+        } else {
+          let nextRewardMsg = "";
+          if (nextReward) {
+            const pointsNeeded = nextReward.min_points - user.total_points;
+            nextRewardMsg = `\n\n🔜 <b>المكافأة القادمة:</b> ${nextReward.name} (${nextReward.reward})
+💪 تحتاج: <b>${pointsNeeded}</b> نقطة إضافية`;
+          }
+          
+          return {
+            success: false,
+            message: `📊 <b>حالة المكافآت</b>
+
+🏆 <b>لقبك الحالي:</b> ${currentTitle}
+📈 <b>نقاطك:</b> ${user.total_points} نقطة
+
+⚠️ لا توجد مكافآت متاحة حالياً.${nextRewardMsg}
+
+💡 <b>كيف تحصل على مكافآت؟</b>
+• أجب على أسئلة المسابقة (سؤال) 🎯
+• سجل دخولك اليومي (/checkin) ✅
+• ادعُ أصدقاءك (/referral) 🔗`,
+          };
+        }
+      }
+
+      const titleReward = TITLE_REWARDS.find(t => t.name === context.rewardTitle);
+      
+      if (!titleReward) {
+        return {
+          success: false,
+          message: `❌ اللقب "${context.rewardTitle}" غير موجود.\n\n🎯 <b>الألقاب المتاحة:</b>\n• مثقف (300 نقطة)\n• عالم (1000 نقطة)\n• فيلسوف (2500 نقطة)\n• عبقري (6000 نقطة)\n• خالد (10000 نقطة)`,
+        };
+      }
+
+      if (user.total_points < titleReward.min_points) {
+        return {
+          success: false,
+          message: `❌ أنت بحاجة إلى <b>${titleReward.min_points}</b> نقطة للحصول على هذه المكافأة.\n📊 نقاطك الحالية: <b>${user.total_points}</b>\n💪 تبقى لك: <b>${titleReward.min_points - user.total_points}</b> نقطة`,
+        };
+      }
+
+      if (claimedRewards.includes(context.rewardTitle)) {
+        return {
+          success: false,
+          message: `⚠️ لقد حصلت على مكافأة لقب <b>${context.rewardTitle}</b> من قبل!\n\n💡 يمكنك المطالبة بمكافآت الألقاب الأخرى التي وصلت إليها.`,
+        };
+      }
+
+      claimedRewards.push(context.rewardTitle);
+      await pool.query(
+        "UPDATE competition_users SET rewards_claimed = $1 WHERE telegram_id = $2",
+        [claimedRewards.join(','), context.telegramId]
+      );
+
+      const botToken = process.env.TELEGRAM_BOT_TOKEN;
+      const userName = context.firstName || context.username || user.first_name || user.username || `المستخدم ${context.telegramId}`;
+      
+      const adminNotification = `🎁 <b>طلب مكافأة جديد!</b>
+
+👤 <b>المستخدم:</b> ${userName}
+🆔 <b>المعرف:</b> <code>${context.telegramId}</code>
+📊 <b>النقاط:</b> ${user.total_points}
+
+🏆 <b>اللقب:</b> ${context.rewardTitle}
+🎁 <b>المكافأة:</b> ${titleReward.reward}
+
+━━━━━━━━━━━━━━━
+⏰ الوقت: ${new Date().toLocaleString('ar-EG', { timeZone: 'Africa/Cairo' })}`;
+
+      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: ADMIN_CHAT_ID,
+          text: adminNotification,
+          parse_mode: "HTML",
+        }),
+      });
+
+      logger?.info("✅ [Engagement] تم طلب المكافأة وإشعار المشرف");
+
+      return {
+        success: true,
+        reward: titleReward.reward,
+        message: `🎉 <b>تم تسجيل طلب المكافأة بنجاح!</b>
+
+🏆 <b>اللقب:</b> ${context.rewardTitle}
+🎁 <b>المكافأة:</b> ${titleReward.reward}
+
+✅ تم إبلاغ المشرف وسيتواصل معك قريباً لتسليم المكافأة.
+
+💡 <i>شكراً لتفاعلك ومشاركتك معنا!</i>`,
+      };
+    } catch (error) {
+      logger?.error("❌ [Engagement] خطأ:", error);
+      return { success: false, message: "حدث خطأ في طلب المكافأة" };
+    }
+  },
+});

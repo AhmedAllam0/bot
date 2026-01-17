@@ -47,8 +47,12 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
 export type TriggerInfoTelegramOnNewMessage = {
   type: "telegram/message";
   params: {
+    chatId: string;
+    userId: string;
     userName: string;
+    firstName: string;
     message: string;
+    messageId: number;
   };
   payload: any;
 };
@@ -74,11 +78,42 @@ export function registerTelegramTrigger({
 
           logger?.info("📝 [Telegram] payload", payload);
 
+          // تجاهل الرسائل المُعدَّلة
+          if (payload.edited_message) {
+            logger?.debug("⏭️ [Telegram] تجاهل رسالة معدّلة");
+            return c.text("OK", 200);
+          }
+
+          // استخراج البيانات من رسالة تيليجرام
+          const message = payload.message || payload.callback_query?.message;
+          const from = payload.message?.from || payload.callback_query?.from;
+          
+          if (!message || !from) {
+            logger?.warn("⚠️ [Telegram] رسالة غير صالحة", payload);
+            return c.text("OK", 200);
+          }
+
+          // تجاهل الرسائل المُحوَّلة تلقائياً من القناة
+          if (message.is_automatic_forward || message.forward_from_chat) {
+            logger?.debug("⏭️ [Telegram] تجاهل رسالة محوّلة من القناة");
+            return c.text("OK", 200);
+          }
+
+          // تجاهل الرسائل من البوتات أو من Telegram (userId: 777000)
+          if (from.is_bot || from.id === 777000) {
+            logger?.debug("⏭️ [Telegram] تجاهل رسالة من بوت");
+            return c.text("OK", 200);
+          }
+
           await handler(mastra, {
             type: triggerType,
             params: {
-              userName: payload.message.from.username,
-              message: payload.message.text,
+              chatId: String(message.chat?.id || ""),
+              userId: String(from.id || ""),
+              userName: from.username || "unknown",
+              firstName: from.first_name || "مستخدم",
+              message: message.text || payload.callback_query?.data || "",
+              messageId: message.message_id || 0,
             },
             payload,
           } as TriggerInfoTelegramOnNewMessage);
