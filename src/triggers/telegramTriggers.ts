@@ -132,13 +132,30 @@ export function registerTelegramTrigger({
           // للـ callback_query: استخدم callback_data كرسالة
           // للرسائل العادية: استخدم نص الرسالة
           const messageText = payload.callback_query?.data || message.text || "";
+          const isCallback = !!payload.callback_query;
           
           logger?.info("📨 [Telegram Trigger] رسالة جديدة:", {
             chatId: String(message.chat?.id || ""),
             userId: String(from.id || ""),
             message: messageText.substring(0, 50),
-            isCallback: !!payload.callback_query,
+            isCallback,
           });
+
+          // الرد على callback_query لإزالة spinner من الزر
+          if (isCallback && payload.callback_query?.id) {
+            try {
+              await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  callback_query_id: payload.callback_query.id,
+                }),
+              });
+              logger?.debug("✅ [Telegram] تم الرد على callback_query");
+            } catch (err) {
+              logger?.warn("⚠️ [Telegram] فشل الرد على callback_query:", err);
+            }
+          }
 
           await handler(mastra, {
             type: triggerType,

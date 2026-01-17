@@ -66,9 +66,47 @@ const processWithAgent = createStep({
   },
 });
 
+// حد الحروف الأقصى لتيليجرام
+const TELEGRAM_MAX_LENGTH = 4096;
+
+/**
+ * تقسيم النص الطويل إلى أجزاء بحد 4096 حرف
+ * يحاول القص عند نهايات الأسطر أو الفقرات
+ */
+function splitLongMessage(text: string, maxLength: number = TELEGRAM_MAX_LENGTH): string[] {
+  if (text.length <= maxLength) return [text];
+  
+  const chunks: string[] = [];
+  let remaining = text;
+  
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLength) {
+      chunks.push(remaining);
+      break;
+    }
+    
+    // البحث عن أفضل نقطة للقص (نهاية سطر أو فقرة)
+    let cutPoint = remaining.lastIndexOf('\n\n', maxLength);
+    if (cutPoint === -1 || cutPoint < maxLength * 0.5) {
+      cutPoint = remaining.lastIndexOf('\n', maxLength);
+    }
+    if (cutPoint === -1 || cutPoint < maxLength * 0.5) {
+      cutPoint = remaining.lastIndexOf(' ', maxLength);
+    }
+    if (cutPoint === -1 || cutPoint < maxLength * 0.5) {
+      cutPoint = maxLength;
+    }
+    
+    chunks.push(remaining.substring(0, cutPoint).trim());
+    remaining = remaining.substring(cutPoint).trim();
+  }
+  
+  return chunks;
+}
+
 /**
  * الخطوة 2: إرسال الرد لتيليجرام
- * فقط إرسال الرسالة - لا منطق إضافي
+ * يتعامل مع الرسائل الطويلة ويسجل أخطاء API
  */
 const sendToTelegram = createStep({
   id: "send-to-telegram",
@@ -89,7 +127,10 @@ const sendToTelegram = createStep({
     const logger = mastra?.getLogger();
     const { chatId, messageId, agentResponse } = inputData;
     
-    logger?.info("📤 [Step 2] إرسال الرد لتيليجرام");
+    logger?.info("📤 [Step 2] إرسال الرد لتيليجرام", { 
+      chatId, 
+      responseLength: agentResponse.length 
+    });
 
     const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
     
@@ -98,33 +139,87 @@ const sendToTelegram = createStep({
       return { sent: false, chatId };
     }
 
-    // إرسال بتنسيق HTML للحصول على تنسيق أفضل
-    const response = await fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    // تقسيم الرسالة إذا كانت طويلة
+    const messageChunks = splitLongMessage(agentResponse);
+    logger?.info(`📝 [Step 2] تقسيم الرسالة إلى ${messageChunks.length} جزء`);
+
+    let allSent = true;
+    
+    for (let i = 0; i < messageChunks.length; i++) {
+      const chunk = messageChunks[i];
+      const isLastChunk = i === messageChunks.length - 1;
+      
+      // إضافة الأزرار فقط للرسالة الأخيرة
+      const payload: any = {
         chat_id: chatId,
-        text: agentResponse,
+        text: chunk,
         parse_mode: "HTML",
         disable_web_page_preview: true,
-        reply_to_message_id: messageId,
-        reply_markup: {
+      };
+      
+      // الرد على الرسالة الأصلية للرسالة الأولى فقط
+      if (i === 0 && messageId) {
+        payload.reply_to_message_id = messageId;
+      }
+      
+      // إضافة الأزرار للرسالة الأخيرة فقط
+      if (isLastChunk) {
+        payload.reply_markup = {
           inline_keyboard: [
             [{ text: "🔍 بحث جديد", callback_data: "new_search" }],
             [{ text: "📊 إحصائياتي", callback_data: "my_stats" }, { text: "🏆 المتصدرين", callback_data: "leaderboard" }],
             [{ text: "📤 شارك البوت", switch_inline_query: "جرب بوت خلاصة الكتب! 📚" }],
           ],
-        },
-      }),
-    });
+        };
+      }
 
-    if (!response.ok) {
-      logger?.error("❌ [Step 2] فشل إرسال الرسالة");
-      return { sent: false, chatId };
+      const response = await fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        // تسجيل تفاصيل الخطأ للتشخيص
+        const errorBody = await response.text().catch(() => "Unable to read error body");
+        logger?.error("❌ [Step 2] فشل إرسال الرسالة", {
+          status: response.status,
+          statusText: response.statusText,
+          errorBody,
+          chunkIndex: i,
+          chunkLength: chunk.length,
+        });
+        allSent = false;
+        
+        // محاولة إرسال بدون HTML إذا فشل التنسيق
+        if (response.status === 400 && errorBody.includes("parse")) {
+          logger?.info("🔄 [Step 2] إعادة المحاولة بدون تنسيق HTML");
+          const retryPayload = { ...payload, parse_mode: undefined };
+          delete retryPayload.parse_mode;
+          
+          const retryResponse = await fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(retryPayload),
+          });
+          
+          if (retryResponse.ok) {
+            logger?.info("✅ [Step 2] نجحت إعادة المحاولة بدون HTML");
+            allSent = true;
+          }
+        }
+      } else {
+        logger?.debug(`✅ [Step 2] تم إرسال الجزء ${i + 1}/${messageChunks.length}`);
+      }
+      
+      // تأخير قصير بين الرسائل لتجنب rate limiting
+      if (i < messageChunks.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
     }
 
-    logger?.info("✅ [Step 2] تم إرسال الرد بنجاح");
-    return { sent: true, chatId };
+    logger?.info("✅ [Step 2] تم إرسال الرد بنجاح", { allSent });
+    return { sent: allSent, chatId };
   },
 });
 
