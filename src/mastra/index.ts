@@ -207,6 +207,7 @@ export const mastra = new Mastra({
               context: { timeRange },
               mastra,
               runId: "",
+              runtimeContext: {} as any,
             });
             return c.json(result || { success: false, message: "خطأ" });
           } catch (error: any) {
@@ -232,6 +233,7 @@ export const mastra = new Mastra({
               context: { limit },
               mastra,
               runId: "",
+              runtimeContext: {} as any,
             });
             return c.json(result || { success: false, message: "خطأ" });
           } catch (error: any) {
@@ -258,6 +260,7 @@ export const mastra = new Mastra({
               context: { limit, sortBy },
               mastra,
               runId: "",
+              runtimeContext: {} as any,
             });
             return c.json(result || { success: false, message: "خطأ" });
           } catch (error: any) {
