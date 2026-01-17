@@ -16,6 +16,10 @@ Preferred communication style: Simple, everyday language.
 - **Fixed tool calls**: Switched from Mistral to OpenAI AI Integrations for reliable tool execution with generateLegacy
 - **Fixed points system**: Added database transactions with `BEGIN/COMMIT` and `SELECT FOR UPDATE` locking to prevent race conditions and duplicate awards
 - **Admin message filtering**: Messages from admin IDs (1002139582646, 1002129652576) are now ignored
+- **Fixed callback spinner**: Added `answerCallbackQuery` to acknowledge inline button presses and remove loading spinner
+- **Fixed long messages**: Added message splitting for responses exceeding Telegram's 4096 character limit
+- **Improved error logging**: Telegram API errors now log HTTP status, statusText, and error body for debugging
+- **HTML parse fallback**: If HTML formatting fails, messages are automatically retried without formatting
 
 ### Removed Features
 - **Competition system**: Completely removed (deleted competition.ts and all references)
