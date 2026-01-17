@@ -177,10 +177,10 @@ export const mastra = new Mastra({
     ],
     apiRoutes: [
       // ======================================================================
-      // Health Check Endpoint for Cloud Run (must be under /api/ path)
+      // Health Check Endpoint for Cloud Run (root path for default probe)
       // ======================================================================
       {
-        path: "/api/health",
+        path: "/",
         method: "GET",
         createHandler: async () => async (c: any) => {
           return c.json({ status: "ok", service: "خلاصة الكتب Bot" }, 200);
