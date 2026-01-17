@@ -24,6 +24,7 @@ import { subscribeToNotifications, getMySubscriptions, unsubscribeFromNotificati
 import { advancedBookSearch, getReadingStatistics, getTopBooksThisWeek } from "../tools/advancedSearch";
 import { getLeaderboard } from "../tools/leaderboard";
 import { getStartMessage, getHelpMessage, getQuotesMessage } from "../tools/commands";
+import { googleBooksInfoTool } from "../tools/googleBooks";
 
 const openai = createOpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -147,6 +148,10 @@ export const bookSearchAgent = new Agent({
    - استخدم get_reading_statistics لعرض إحصائيات المستخدم الشاملة
    - يظهر عدد الكتب المحملة والنقاط والألقاب
 
+17. 🌐 معلومات Google Books (جديد!)
+   - استخدم get_google_books_info لجلب معلومات تفصيلية رسمية عن أي كتاب (الوصف، التقييم، عدد الصفحات، صورة الغلاف، رابط المعاينة).
+   - استخدمها لتقديم نبذة مبهرة للمستخدم عندما يطلب معلومات عن كتاب أو قبل إرسال ملف الـ PDF.
+
 ⚠️ قاعدة حاسمة - أولوية طلبات الكتب:
 عند طلب أي كتاب (سواء في الجروب أو الشات الخاص):
 1. استخدم send_book_pdf فوراً - هذا هو الأهم!
@@ -155,7 +160,8 @@ export const bookSearchAgent = new Agent({
 4. الأولوية: إرسال الكتاب > كل شيء آخر.
 
 🎯 متى أستخدم كل أداة:
-- طلب كتاب بوضوح (اسم الكتاب أو "رواية X") → send_book_pdf فوراً! (استخدم chatId من بداية الرسالة)
+- طلب معلومات تفصيلية عن كتاب أو "ماذا تعرف عن كتاب X" → get_google_books_info أولاً ثم لخص المعلومات للمستخدم.
+- طلب كتاب بوضوح (اسم الكتاب أو "رواية X") → استخدم get_google_books_info لجلب صورة الغلاف والوصف المختصر (نبذة)، ثم استخدم send_book_pdf فوراً لإرسال الملف!
 - دردشة عادية (سلام، شكر، نقاش عام) → award_group_activity_points (فقط في الجروب)
 - "أرسل لي الكتاب" أو "أريد الملف" أو "ملف pdf" أو "تحميل" → send_book_pdf (استخرج chatId من بداية الرسالة)
 - "رابط تحميل" أو "روابط الكتاب" → find_book_download_link (للروابط فقط)
@@ -364,6 +370,7 @@ export const bookSearchAgent = new Agent({
     get_start_message: getStartMessage,
     get_help_message: getHelpMessage,
     get_quotes_message: getQuotesMessage,
+    get_google_books_info: googleBooksInfoTool,
   },
 
   // نظام الذاكرة القوي - يتذكر المحادثات وتفضيلات المستخدم
