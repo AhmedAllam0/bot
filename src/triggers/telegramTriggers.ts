@@ -95,6 +95,81 @@ export function registerTelegramTrigger({
             return c.text("OK", 200);
           }
 
+          // الترحيب بالأعضاء الجدد ثم حذف الرسالة
+          if (payload.message?.new_chat_members && payload.message.new_chat_members.length > 0) {
+            const chatId = String(payload.message.chat?.id || "");
+            const newMembers = payload.message.new_chat_members;
+            
+            logger?.info("👋 [Telegram] أعضاء جدد انضموا:", { chatId, count: newMembers.length });
+            
+            // دالة لتنظيف النص من أحرف HTML الخاصة
+            const escapeHtml = (text: string): string => {
+              return text
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+            };
+            
+            for (const member of newMembers) {
+              // تجاهل البوتات
+              if (member.is_bot) continue;
+              
+              const firstName = escapeHtml(member.first_name || "صديق");
+              const welcomeMessage = `🎉 أهلاً وسهلاً <b>${firstName}</b>!\n\n📚 مرحباً بك في <b>خلاصة الكتب</b>\n\n✨ اكتب اسم أي كتاب وسأجد لك رابط تحميله أو أرسله لك مباشرة!\n\n💡 جرب: "كتاب الأمير" أو "رواية الفيل الأزرق"`;
+              
+              try {
+                const response = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    chat_id: chatId,
+                    text: welcomeMessage,
+                    parse_mode: "HTML",
+                  }),
+                });
+                
+                if (response.ok) {
+                  const result = await response.json();
+                  const welcomeMessageId = result.result?.message_id;
+                  
+                  logger?.info("✅ [Telegram] تم إرسال رسالة الترحيب:", { chatId, messageId: welcomeMessageId });
+                  
+                  // حذف الرسالة بعد 30 ثانية
+                  if (welcomeMessageId) {
+                    setTimeout(async () => {
+                      try {
+                        await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/deleteMessage`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            chat_id: chatId,
+                            message_id: welcomeMessageId,
+                          }),
+                        });
+                        logger?.debug("🗑️ [Telegram] تم حذف رسالة الترحيب");
+                      } catch (deleteErr) {
+                        logger?.debug("⚠️ [Telegram] فشل حذف رسالة الترحيب:", deleteErr);
+                      }
+                    }, 30000); // 30 ثانية
+                  }
+                } else {
+                  const errorBody = await response.text().catch(() => "Unable to read error");
+                  logger?.error("❌ [Telegram] فشل إرسال رسالة الترحيب:", {
+                    status: response.status,
+                    statusText: response.statusText,
+                    errorBody,
+                  });
+                }
+              } catch (err) {
+                logger?.warn("⚠️ [Telegram] فشل إرسال رسالة الترحيب:", err);
+              }
+            }
+            
+            return c.text("OK", 200);
+          }
+
           // استخراج البيانات من رسالة تيليجرام
           const message = payload.message || payload.callback_query?.message;
           const from = payload.message?.from || payload.callback_query?.from;
