@@ -187,13 +187,18 @@ export const mastra = new Mastra({
       },
 
       // ======================================================================
-      // Admin Dashboard API Routes
+      // Admin Dashboard API Routes (Protected with SESSION_SECRET)
       // ======================================================================
       {
         path: "/api/admin/dashboard",
         method: "GET",
         createHandler: async ({ mastra }) => async (c: any) => {
           const logger = mastra?.getLogger();
+          const authToken = c.req.header("X-Admin-Token") || c.req.query("token");
+          if (!authToken || authToken !== process.env.SESSION_SECRET) {
+            logger?.warn("🚫 [Admin] محاولة وصول غير مصرح");
+            return c.json({ success: false, message: "غير مصرح" }, 401);
+          }
           const timeRange = c.req.query("timeRange") || "today";
           logger?.info("📊 [Admin] طلب إحصائيات الداشبورد", { timeRange });
           
@@ -216,6 +221,10 @@ export const mastra = new Mastra({
         method: "GET",
         createHandler: async ({ mastra }) => async (c: any) => {
           const logger = mastra?.getLogger();
+          const authToken = c.req.header("X-Admin-Token") || c.req.query("token");
+          if (!authToken || authToken !== process.env.SESSION_SECRET) {
+            return c.json({ success: false, message: "غير مصرح" }, 401);
+          }
           const limit = parseInt(c.req.query("limit") || "50");
           logger?.info("📝 [Admin] طلب آخر الرسائل", { limit });
           
@@ -238,6 +247,10 @@ export const mastra = new Mastra({
         method: "GET",
         createHandler: async ({ mastra }) => async (c: any) => {
           const logger = mastra?.getLogger();
+          const authToken = c.req.header("X-Admin-Token") || c.req.query("token");
+          if (!authToken || authToken !== process.env.SESSION_SECRET) {
+            return c.json({ success: false, message: "غير مصرح" }, 401);
+          }
           const limit = parseInt(c.req.query("limit") || "100");
           const sortBy = c.req.query("sortBy") || "totalPoints";
           logger?.info("👥 [Admin] طلب قائمة المستخدمين", { limit, sortBy });
@@ -260,6 +273,10 @@ export const mastra = new Mastra({
         path: "/admin",
         method: "GET",
         createHandler: async () => async (c: any) => {
+          const authToken = c.req.query("token");
+          if (!authToken || authToken !== process.env.SESSION_SECRET) {
+            return c.html(`<!DOCTYPE html><html dir="rtl"><head><title>تسجيل الدخول</title><style>body{background:#1a1a2e;color:#eee;font-family:Arial;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}.login{background:#16213e;padding:40px;border-radius:12px;text-align:center}input{padding:12px;font-size:16px;border-radius:8px;border:1px solid #0f3460;margin:10px;background:#0f3460;color:#eee}button{background:#e94560;color:white;border:none;padding:12px 30px;border-radius:8px;cursor:pointer;font-size:16px}</style></head><body><div class="login"><h1>🔐 لوحة التحكم</h1><form method="get"><input type="password" name="token" placeholder="كلمة المرور"><br><button type="submit">دخول</button></form></div></body></html>`);
+          }
           const html = `<!DOCTYPE html>
 <html dir="rtl" lang="ar">
 <head>
@@ -319,12 +336,13 @@ export const mastra = new Mastra({
   </div>
   <script>
     let currentRange = 'today';
+    const token = new URLSearchParams(window.location.search).get('token');
     async function loadStats(range) {
       currentRange = range;
       document.querySelectorAll('.time-range .tab').forEach(t => t.classList.remove('active'));
-      event.target.classList.add('active');
+      if(event && event.target) event.target.classList.add('active');
       try {
-        const res = await fetch('/api/admin/dashboard?timeRange=' + range);
+        const res = await fetch('/api/admin/dashboard?timeRange=' + range + '&token=' + token);
         const data = await res.json();
         if (data.success && data.stats) {
           const s = data.stats;
@@ -333,23 +351,27 @@ export const mastra = new Mastra({
             <div class="stat-card"><div class="number">\${s.uniqueUsers || 0}</div><div class="label">المستخدمين الفريدين</div></div>
             <div class="stat-card"><div class="number">\${s.bookSearches || 0}</div><div class="label">عمليات البحث</div></div>
             <div class="stat-card"><div class="number">\${s.pdfDownloads || 0}</div><div class="label">التحميلات</div></div>
-            <div class="stat-card"><div class="number">\${s.newUsers || 0}</div><div class="label">مستخدمين جدد</div></div>
-            <div class="stat-card"><div class="number">\${s.avgProcessingTime ? s.avgProcessingTime.toFixed(0) + 'ms' : '0ms'}</div><div class="label">متوسط وقت المعالجة</div></div>
+            <div class="stat-card"><div class="number">\${s.newUsersCount || s.newUsers || 0}</div><div class="label">مستخدمين جدد</div></div>
+            <div class="stat-card"><div class="number">\${s.averageProcessingTime ? s.averageProcessingTime.toFixed(0) + 'ms' : '0ms'}</div><div class="label">متوسط وقت المعالجة</div></div>
           \`;
           if (s.topUsers && s.topUsers.length > 0) {
             document.getElementById('topUsers').innerHTML = '<table><tr><th>#</th><th>المستخدم</th><th>النقاط</th><th>السلسلة</th><th>الإحالات</th></tr>' +
               s.topUsers.map((u, i) => \`<tr><td>\${i+1}</td><td>\${u.firstName || u.username || 'مستخدم'}</td><td><span class="badge badge-success">\${u.totalPoints || 0}</span></td><td>\${u.dailyStreak || 0} يوم</td><td>\${u.totalReferrals || 0}</td></tr>\`).join('') + '</table>';
+          } else {
+            document.getElementById('topUsers').innerHTML = '<p style="text-align:center;color:#a0a0a0">لا يوجد مستخدمين بعد</p>';
           }
         }
       } catch(e) { console.error(e); }
     }
     async function loadMessages() {
       try {
-        const res = await fetch('/api/admin/messages?limit=30');
+        const res = await fetch('/api/admin/messages?limit=30&token=' + token);
         const data = await res.json();
-        if (data.success && data.messages) {
+        if (data.success && data.messages && data.messages.length > 0) {
           document.getElementById('recentMessages').innerHTML = '<table><tr><th>الوقت</th><th>المستخدم</th><th>الرسالة</th><th>النوع</th></tr>' +
             data.messages.map(m => \`<tr><td>\${new Date(m.createdAt).toLocaleString('ar-EG')}</td><td>\${m.firstName || m.username || m.telegramId}</td><td>\${(m.messagePreview || '').substring(0, 50)}...</td><td><span class="badge badge-info">\${m.messageType}</span></td></tr>\`).join('') + '</table>';
+        } else {
+          document.getElementById('recentMessages').innerHTML = '<p style="text-align:center;color:#a0a0a0">لا توجد رسائل بعد</p>';
         }
       } catch(e) { console.error(e); }
     }
