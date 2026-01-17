@@ -8,8 +8,8 @@ const rateLimitStore = new Map<string, RateLimitEntry>();
 const RATE_LIMITS = {
   message: { maxRequests: 30, windowMs: 60000 },
   bookSearch: { maxRequests: 10, windowMs: 60000 },
-  quiz: { maxRequests: 20, windowMs: 60000 },
   groupPoints: { maxRequests: 60, windowMs: 60000 },
+  engagement: { maxRequests: 30, windowMs: 60000 },
 };
 
 export function checkRateLimit(

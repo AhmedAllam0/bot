@@ -97,32 +97,47 @@ export const awardGroupActivityPoints = createTool({
       return { success: false, pointsAwarded: 0, message: "هذه الميزة متاحة فقط في الجروب الرسمي" };
     }
 
+    const client = await pool.connect();
     try {
+      logger?.info("📊 [Engagement] بدء معاملة للنشاط الجماعي");
+      await client.query('BEGIN');
+
       const userId = await ensureUserExists(context.telegramId, context.username, context.firstName);
+      logger?.info("✅ [Engagement] تم التحقق من وجود المستخدم:", userId);
 
       const today = new Date().toISOString().split('T')[0];
-      let activityResult = await pool.query(
-        "SELECT * FROM daily_activity WHERE telegram_id = $1 AND activity_date = $2",
+      logger?.info("📅 [Engagement] التاريخ الحالي:", today);
+
+      // استخدام SELECT FOR UPDATE لقفل الصف
+      let activityResult = await client.query(
+        "SELECT * FROM daily_activity WHERE telegram_id = $1 AND activity_date = $2 FOR UPDATE",
         [context.telegramId, today]
       );
+      logger?.info("📝 [Engagement] جلب بيانات النشاط مع القفل");
 
       let currentDailyPoints = 0;
       let messageCount = 0;
+      let pointsAwarded = 0;
 
       if (activityResult.rows.length === 0) {
-        await pool.query(
+        logger?.info("📊 [Engagement] لا توجد بيانات نشاط اليوم، إنشاء سجل جديد");
+        await client.query(
           `INSERT INTO daily_activity (user_id, telegram_id, activity_date, group_messages, group_points_earned)
            VALUES ($1, $2, $3, 1, $4)`,
           [userId, context.telegramId, today, POINTS_PER_MESSAGE]
         );
         currentDailyPoints = POINTS_PER_MESSAGE;
         messageCount = 1;
+        pointsAwarded = POINTS_PER_MESSAGE;
+        logger?.info("✅ [Engagement] تم إنشاء سجل جديد", { currentDailyPoints, messageCount });
       } else {
         currentDailyPoints = activityResult.rows[0].group_points_earned;
         messageCount = activityResult.rows[0].group_messages;
+        logger?.info("📊 [Engagement] البيانات الحالية", { currentDailyPoints, messageCount });
 
         if (currentDailyPoints >= DAILY_GROUP_POINTS_LIMIT) {
-          logger?.info("📊 [Engagement] وصل الحد اليومي:", currentDailyPoints);
+          logger?.info("⚠️ [Engagement] وصل الحد اليومي");
+          await client.query('COMMIT');
           return {
             success: true,
             pointsAwarded: 0,
@@ -133,38 +148,53 @@ export const awardGroupActivityPoints = createTool({
         }
 
         const newPoints = Math.min(currentDailyPoints + POINTS_PER_MESSAGE, DAILY_GROUP_POINTS_LIMIT);
-        const actualPointsAwarded = newPoints - currentDailyPoints;
+        pointsAwarded = newPoints - currentDailyPoints;
+        logger?.info("📊 [Engagement] النقاط الجديدة المحسوبة", { newPoints, pointsAwarded });
 
-        await pool.query(
+        await client.query(
           `UPDATE daily_activity 
            SET group_messages = $1, group_points_earned = $2
            WHERE telegram_id = $3 AND activity_date = $4`,
           [messageCount + 1, newPoints, context.telegramId, today]
         );
+        logger?.info("✅ [Engagement] تم تحديث بيانات النشاط اليومي");
 
         currentDailyPoints = newPoints;
         messageCount += 1;
       }
 
-      await pool.query(
+      // تحديث النقاط الكلية للمستخدم
+      await client.query(
         `UPDATE competition_users SET total_points = total_points + $1 WHERE telegram_id = $2`,
-        [POINTS_PER_MESSAGE, context.telegramId]
+        [pointsAwarded, context.telegramId]
       );
+      logger?.info("✅ [Engagement] تم تحديث النقاط الكلية للمستخدم", { pointsAwarded });
+
+      // تأكيد المعاملة
+      await client.query('COMMIT');
+      logger?.info("✅ [Engagement] تم تأكيد المعاملة بنجاح");
 
       const remainingPoints = DAILY_GROUP_POINTS_LIMIT - currentDailyPoints;
 
-      logger?.info("✅ [Engagement] تم منح النقاط:", { currentDailyPoints, remainingPoints });
-
       return {
         success: true,
-        pointsAwarded: POINTS_PER_MESSAGE,
+        pointsAwarded: pointsAwarded,
         totalDailyPoints: currentDailyPoints,
         remainingDailyPoints: remainingPoints,
-        message: `+${POINTS_PER_MESSAGE} نقطة! 📊 مجموع اليوم: ${currentDailyPoints}/${DAILY_GROUP_POINTS_LIMIT}`,
+        message: `+${pointsAwarded} نقطة! 📊 مجموع اليوم: ${currentDailyPoints}/${DAILY_GROUP_POINTS_LIMIT}`,
       };
     } catch (error) {
-      logger?.error("❌ [Engagement] خطأ:", error);
+      logger?.error("❌ [Engagement] خطأ في معاملة النشاط الجماعي:", error);
+      try {
+        await client.query('ROLLBACK');
+        logger?.info("🔄 [Engagement] تم استرجاع المعاملة");
+      } catch (rollbackError) {
+        logger?.error("❌ [Engagement] خطأ في استرجاع المعاملة:", rollbackError);
+      }
       return { success: false, pointsAwarded: 0, message: "حدث خطأ في تسجيل النشاط" };
+    } finally {
+      client.release();
+      logger?.info("🔓 [Engagement] تم إطلاق اتصال قاعدة البيانات");
     }
   },
 });
@@ -192,19 +222,30 @@ export const checkInDaily = createTool({
       return { success: false, message: "خطأ في إعدادات قاعدة البيانات" };
     }
 
+    const client = await pool.connect();
     try {
-      await ensureUserExists(context.telegramId, context.username, context.firstName);
+      logger?.info("📅 [Engagement] بدء معاملة تسجيل الدخول");
+      await client.query('BEGIN');
 
-      const userResult = await pool.query(
-        "SELECT * FROM competition_users WHERE telegram_id = $1",
+      await ensureUserExists(context.telegramId, context.username, context.firstName);
+      logger?.info("✅ [Engagement] تم التحقق من وجود المستخدم");
+
+      // استخدام SELECT FOR UPDATE لقفل صف المستخدم
+      const userResult = await client.query(
+        "SELECT * FROM competition_users WHERE telegram_id = $1 FOR UPDATE",
         [context.telegramId]
       );
+      logger?.info("🔒 [Engagement] تم قفل صف المستخدم");
+
       const user = userResult.rows[0];
 
       const today = new Date().toISOString().split('T')[0];
       const lastCheckin = user.last_checkin ? new Date(user.last_checkin).toISOString().split('T')[0] : null;
+      logger?.info("📅 [Engagement] تاريخ آخر دخول:", { lastCheckin, today });
 
       if (lastCheckin === today) {
+        logger?.info("⚠️ [Engagement] المستخدم سجل دخولاً اليوم بالفعل");
+        await client.query('COMMIT');
         return {
           success: false,
           currentStreak: user.daily_streak,
@@ -215,10 +256,14 @@ export const checkInDaily = createTool({
       const yesterday = new Date();
       yesterday.setDate(yesterday.getDate() - 1);
       const yesterdayStr = yesterday.toISOString().split('T')[0];
+      logger?.info("📅 [Engagement] تاريخ أمس:", yesterdayStr);
 
       let newStreak = 1;
       if (lastCheckin === yesterdayStr) {
         newStreak = user.daily_streak + 1;
+        logger?.info("🔥 [Engagement] تسلسل متواصل مستمر، الشريط الجديد:", newStreak);
+      } else {
+        logger?.info("🔄 [Engagement] انقطاع في التسلسل، إعادة تشغيل الشريط");
       }
 
       let bonusPoints = 0;
@@ -227,20 +272,26 @@ export const checkInDaily = createTool({
       if (newStreak === 7) {
         bonusPoints = STREAK_7_BONUS;
         bonusMessage = `\n🎉 <b>مكافأة أسبوع!</b> +${STREAK_7_BONUS} نقطة إضافية!`;
+        logger?.info("🎉 [Engagement] مكافأة أسبوع!");
       } else if (newStreak === 30) {
         bonusPoints = STREAK_30_BONUS;
         bonusMessage = `\n🏆 <b>مكافأة شهر كامل!</b> +${STREAK_30_BONUS} نقطة إضافية!`;
+        logger?.info("🏆 [Engagement] مكافأة شهر كامل!");
       } else if (newStreak % 30 === 0) {
         bonusPoints = STREAK_30_BONUS;
         bonusMessage = `\n🏆 <b>مكافأة ${newStreak} يوم!</b> +${STREAK_30_BONUS} نقطة إضافية!`;
+        logger?.info("🏆 [Engagement] مكافأة متعددة الشهور!");
       } else if (newStreak % 7 === 0) {
         bonusPoints = STREAK_7_BONUS;
         bonusMessage = `\n🎉 <b>مكافأة ${newStreak} يوم!</b> +${STREAK_7_BONUS} نقطة إضافية!`;
+        logger?.info("🎉 [Engagement] مكافأة متعددة الأسابيع!");
       }
 
       const totalPoints = DAILY_CHECKIN_POINTS + bonusPoints;
+      logger?.info("📊 [Engagement] إجمالي النقاط المراد منحها:", { basePoints: DAILY_CHECKIN_POINTS, bonusPoints, totalPoints });
 
-      await pool.query(
+      // تحديث بيانات المستخدم
+      await client.query(
         `UPDATE competition_users 
          SET total_points = total_points + $1,
              daily_streak = $2,
@@ -248,17 +299,21 @@ export const checkInDaily = createTool({
          WHERE telegram_id = $4`,
         [totalPoints, newStreak, today, context.telegramId]
       );
+      logger?.info("✅ [Engagement] تم تحديث بيانات المستخدم");
 
-      const today2 = new Date().toISOString().split('T')[0];
-      await pool.query(
+      // تحديث أو إنشاء سجل النشاط اليومي
+      await client.query(
         `INSERT INTO daily_activity (user_id, telegram_id, activity_date, daily_checkin)
          VALUES ($1, $2, $3, true)
          ON CONFLICT (telegram_id, activity_date) 
          DO UPDATE SET daily_checkin = true`,
-        [user.id, context.telegramId, today2]
+        [user.id, context.telegramId, today]
       );
+      logger?.info("✅ [Engagement] تم تحديث سجل النشاط اليومي");
 
-      logger?.info("✅ [Engagement] تم تسجيل الدخول:", { newStreak, totalPoints });
+      // تأكيد المعاملة
+      await client.query('COMMIT');
+      logger?.info("✅ [Engagement] تم تأكيد معاملة تسجيل الدخول");
 
       let streakEmoji = "🔥";
       if (newStreak >= 30) streakEmoji = "🏆";
@@ -278,8 +333,17 @@ ${streakEmoji} <b>سلسلة:</b> ${newStreak} يوم متتالي${bonusMessage
 💡 <i>استمر بتسجيل الدخول يومياً للحصول على مكافآت!</i>`,
       };
     } catch (error) {
-      logger?.error("❌ [Engagement] خطأ:", error);
+      logger?.error("❌ [Engagement] خطأ في معاملة تسجيل الدخول:", error);
+      try {
+        await client.query('ROLLBACK');
+        logger?.info("🔄 [Engagement] تم استرجاع معاملة تسجيل الدخول");
+      } catch (rollbackError) {
+        logger?.error("❌ [Engagement] خطأ في استرجاع المعاملة:", rollbackError);
+      }
       return { success: false, message: "حدث خطأ في تسجيل الدخول" };
+    } finally {
+      client.release();
+      logger?.info("🔓 [Engagement] تم إطلاق اتصال قاعدة البيانات");
     }
   },
 });
@@ -372,25 +436,39 @@ export const processReferral = createTool({
       return { success: false, message: "خطأ في إعدادات قاعدة البيانات" };
     }
 
+    const client = await pool.connect();
     try {
-      const existingReferral = await pool.query(
-        "SELECT * FROM referrals WHERE referee_telegram_id = $1",
+      logger?.info("🎯 [Engagement] بدء معاملة معالجة الإحالة");
+      await client.query('BEGIN');
+
+      // التحقق من عدم وجود إحالة سابقة للمستخدم الجديد
+      logger?.info("🔍 [Engagement] فحص وجود إحالات سابقة");
+      const existingReferral = await client.query(
+        "SELECT * FROM referrals WHERE referee_telegram_id = $1 FOR UPDATE",
         [context.refereeTelegramId]
       );
+      logger?.info("📝 [Engagement] نتيجة فحص الإحالات السابقة:", existingReferral.rows.length);
 
       if (existingReferral.rows.length > 0) {
+        logger?.warn("⚠️ [Engagement] المستخدم لديه إحالة سابقة");
+        await client.query('COMMIT');
         return {
           success: false,
           message: "⚠️ لقد استخدمت كود إحالة من قبل. لا يمكن استخدام أكثر من كود واحد.",
         };
       }
 
-      const referrerResult = await pool.query(
-        "SELECT telegram_id, first_name FROM competition_users WHERE referral_code = $1",
+      // جلب بيانات المُحيل
+      logger?.info("🔍 [Engagement] جلب بيانات المحيل بناءً على كود الإحالة");
+      const referrerResult = await client.query(
+        "SELECT telegram_id, first_name FROM competition_users WHERE referral_code = $1 FOR UPDATE",
         [context.referralCode]
       );
+      logger?.info("📝 [Engagement] نتيجة جلب بيانات المحيل");
 
       if (referrerResult.rows.length === 0) {
+        logger?.warn("❌ [Engagement] كود الإحالة غير صالح");
+        await client.query('COMMIT');
         return {
           success: false,
           message: "❌ كود الإحالة غير صالح. تأكد من الكود وحاول مرة أخرى.",
@@ -398,8 +476,11 @@ export const processReferral = createTool({
       }
 
       const referrer = referrerResult.rows[0];
+      logger?.info("✅ [Engagement] تم العثور على المحيل:", { referrerId: referrer.telegram_id });
 
       if (referrer.telegram_id === context.refereeTelegramId) {
+        logger?.warn("❌ [Engagement] محاولة استخدام الكود الخاص بنفس المستخدم");
+        await client.query('COMMIT');
         return {
           success: false,
           message: "❌ لا يمكنك استخدام كود الإحالة الخاص بك!",
@@ -407,27 +488,39 @@ export const processReferral = createTool({
       }
 
       await ensureUserExists(context.refereeTelegramId, context.refereeUsername, context.refereeFirstName);
+      logger?.info("✅ [Engagement] تم التحقق من المستخدم الجديد");
 
-      await pool.query(
+      // إنشاء سجل الإحالة
+      logger?.info("📝 [Engagement] إنشاء سجل الإحالة");
+      await client.query(
         `INSERT INTO referrals (referrer_telegram_id, referee_telegram_id, referral_code, points_awarded)
          VALUES ($1, $2, $3, true)`,
         [referrer.telegram_id, context.refereeTelegramId, context.referralCode]
       );
+      logger?.info("✅ [Engagement] تم إنشاء سجل الإحالة");
 
-      await pool.query(
+      // تحديث نقاط المُحيل
+      logger?.info("📊 [Engagement] تحديث نقاط المحيل، الإضافة:", REFERRER_POINTS);
+      await client.query(
         `UPDATE competition_users 
          SET total_points = total_points + $1,
              total_referrals = total_referrals + 1
          WHERE telegram_id = $2`,
         [REFERRER_POINTS, referrer.telegram_id]
       );
+      logger?.info("✅ [Engagement] تم تحديث نقاط المحيل");
 
-      await pool.query(
+      // تحديث نقاط المستخدم الجديد (المُحال)
+      logger?.info("📊 [Engagement] تحديث نقاط المحال، الإضافة:", REFEREE_POINTS);
+      await client.query(
         `UPDATE competition_users SET total_points = total_points + $1 WHERE telegram_id = $2`,
         [REFEREE_POINTS, context.refereeTelegramId]
       );
+      logger?.info("✅ [Engagement] تم تحديث نقاط المحال");
 
-      logger?.info("✅ [Engagement] تمت الإحالة بنجاح:", { referrer: referrer.telegram_id, referee: context.refereeTelegramId });
+      // تأكيد المعاملة
+      await client.query('COMMIT');
+      logger?.info("✅ [Engagement] تم تأكيد معاملة الإحالة بنجاح");
 
       return {
         success: true,
@@ -441,8 +534,17 @@ export const processReferral = createTool({
 💡 <i>أنشئ كود الإحالة الخاص بك وادعُ أصدقائك!</i>`,
       };
     } catch (error) {
-      logger?.error("❌ [Engagement] خطأ:", error);
+      logger?.error("❌ [Engagement] خطأ في معاملة الإحالة:", error);
+      try {
+        await client.query('ROLLBACK');
+        logger?.info("🔄 [Engagement] تم استرجاع معاملة الإحالة");
+      } catch (rollbackError) {
+        logger?.error("❌ [Engagement] خطأ في استرجاع المعاملة:", rollbackError);
+      }
       return { success: false, message: "حدث خطأ في معالجة الإحالة" };
+    } finally {
+      client.release();
+      logger?.info("🔓 [Engagement] تم إطلاق اتصال قاعدة البيانات");
     }
   },
 });
@@ -683,16 +785,61 @@ ${availableRewards.join('\n')}
         };
       }
 
-      claimedRewards.push(context.rewardTitle);
-      await pool.query(
-        "UPDATE competition_users SET rewards_claimed = $1 WHERE telegram_id = $2",
-        [claimedRewards.join(','), context.telegramId]
-      );
+      const client = await pool.connect();
+      try {
+        logger?.info("🎁 [Engagement] بدء معاملة المطالبة بالمكافأة");
+        await client.query('BEGIN');
 
-      const botToken = process.env.TELEGRAM_BOT_TOKEN;
-      const userName = context.firstName || context.username || user.first_name || user.username || `المستخدم ${context.telegramId}`;
-      
-      const adminNotification = `🎁 <b>طلب مكافأة جديد!</b>
+        // جلب بيانات المستخدم مع القفل للتحقق الأخير
+        const userCheckResult = await client.query(
+          "SELECT total_points, rewards_claimed FROM competition_users WHERE telegram_id = $1 FOR UPDATE",
+          [context.telegramId]
+        );
+        logger?.info("🔒 [Engagement] تم قفل صف المستخدم للتحقق");
+
+        const updatedUser = userCheckResult.rows[0];
+        const updatedClaimedRewards = updatedUser.rewards_claimed ? updatedUser.rewards_claimed.split(',') : [];
+        logger?.info("📝 [Engagement] المكافآت المطلوبة الحالية:", updatedClaimedRewards);
+
+        // التحقق النهائي من عدم المطالبة بالمكافأة من قبل
+        if (updatedClaimedRewards.includes(context.rewardTitle)) {
+          logger?.warn("⚠️ [Engagement] تم المطالبة بهذه المكافأة من قبل بالفعل");
+          await client.query('COMMIT');
+          return {
+            success: false,
+            message: `⚠️ لقد حصلت على مكافأة لقب <b>${context.rewardTitle}</b> من قبل!\n\n💡 يمكنك المطالبة بمكافآت الألقاب الأخرى التي وصلت إليها.`,
+          };
+        }
+
+        // التحقق من كفاية النقاط
+        if (updatedUser.total_points < titleReward.min_points) {
+          logger?.warn("❌ [Engagement] النقاط غير كافية");
+          await client.query('COMMIT');
+          return {
+            success: false,
+            message: `❌ أنت بحاجة إلى <b>${titleReward.min_points}</b> نقطة للحصول على هذه المكافأة.\n📊 نقاطك الحالية: <b>${updatedUser.total_points}</b>\n💪 تبقى لك: <b>${titleReward.min_points - updatedUser.total_points}</b> نقطة`,
+          };
+        }
+
+        // تحديث المكافآت المطلوبة
+        updatedClaimedRewards.push(context.rewardTitle);
+        logger?.info("📝 [Engagement] إضافة المكافأة إلى قائمة المطالبات");
+        
+        await client.query(
+          "UPDATE competition_users SET rewards_claimed = $1 WHERE telegram_id = $2",
+          [updatedClaimedRewards.join(','), context.telegramId]
+        );
+        logger?.info("✅ [Engagement] تم تحديث قائمة المكافآت المطلوبة");
+
+        // تأكيد المعاملة قبل الإشعار
+        await client.query('COMMIT');
+        logger?.info("✅ [Engagement] تم تأكيد معاملة المكافأة");
+
+        // إرسال الإشعار للمشرف (خارج المعاملة)
+        const botToken = process.env.TELEGRAM_BOT_TOKEN;
+        const userName = context.firstName || context.username || user.first_name || user.username || `المستخدم ${context.telegramId}`;
+        
+        const adminNotification = `🎁 <b>طلب مكافأة جديد!</b>
 
 👤 <b>المستخدم:</b> ${userName}
 🆔 <b>المعرف:</b> <code>${context.telegramId}</code>
@@ -704,22 +851,22 @@ ${availableRewards.join('\n')}
 ━━━━━━━━━━━━━━━
 ⏰ الوقت: ${new Date().toLocaleString('ar-EG', { timeZone: 'Africa/Cairo' })}`;
 
-      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: ADMIN_CHAT_ID,
-          text: adminNotification,
-          parse_mode: "HTML",
-        }),
-      });
+        logger?.info("📨 [Engagement] إرسال إشعار للمشرف");
+        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: ADMIN_CHAT_ID,
+            text: adminNotification,
+            parse_mode: "HTML",
+          }),
+        });
+        logger?.info("✅ [Engagement] تم إرسال الإشعار للمشرف");
 
-      logger?.info("✅ [Engagement] تم طلب المكافأة وإشعار المشرف");
-
-      return {
-        success: true,
-        reward: titleReward.reward,
-        message: `🎉 <b>تم تسجيل طلب المكافأة بنجاح!</b>
+        return {
+          success: true,
+          reward: titleReward.reward,
+          message: `🎉 <b>تم تسجيل طلب المكافأة بنجاح!</b>
 
 🏆 <b>اللقب:</b> ${context.rewardTitle}
 🎁 <b>المكافأة:</b> ${titleReward.reward}
@@ -727,7 +874,20 @@ ${availableRewards.join('\n')}
 ✅ تم إبلاغ المشرف وسيتواصل معك قريباً لتسليم المكافأة.
 
 💡 <i>شكراً لتفاعلك ومشاركتك معنا!</i>`,
-      };
+        };
+      } catch (error) {
+        logger?.error("❌ [Engagement] خطأ في معاملة المكافأة:", error);
+        try {
+          await client.query('ROLLBACK');
+          logger?.info("🔄 [Engagement] تم استرجاع معاملة المكافأة");
+        } catch (rollbackError) {
+          logger?.error("❌ [Engagement] خطأ في استرجاع المعاملة:", rollbackError);
+        }
+        return { success: false, message: "حدث خطأ في طلب المكافأة" };
+      } finally {
+        client.release();
+        logger?.info("🔓 [Engagement] تم إطلاق اتصال قاعدة البيانات");
+      }
     } catch (error) {
       logger?.error("❌ [Engagement] خطأ:", error);
       return { success: false, message: "حدث خطأ في طلب المكافأة" };
