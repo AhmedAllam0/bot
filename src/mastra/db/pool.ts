@@ -202,6 +202,92 @@ async function createCoreTablesIfNotExist(client: pg.PoolClient) {
   console.log(`✅ [Database] تم إنشاء الجداول الأساسية بنجاح`);
 }
 
+// Migration to create book_cache table
+async function createBookCacheTable(client: pg.PoolClient) {
+  const migrationName = "003_create_book_cache_table";
+  
+  const result = await client.query(
+    "SELECT * FROM migrations WHERE name = $1",
+    [migrationName]
+  );
+
+  if (result.rows.length > 0) {
+    console.log(`⏭️ [Database] تم تنفيذ الهجرة بالفعل: ${migrationName}`);
+    return;
+  }
+
+  console.log(`⚙️ [Database] تنفيذ الهجرة: ${migrationName}`);
+
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS book_cache (
+      id SERIAL PRIMARY KEY,
+      book_name_normalized VARCHAR(500) UNIQUE NOT NULL,
+      book_name_original VARCHAR(500) NOT NULL,
+      pdf_url TEXT,
+      download_links JSONB,
+      summary TEXT,
+      author VARCHAR(255),
+      category VARCHAR(100),
+      search_count INTEGER DEFAULT 1,
+      last_searched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS idx_book_cache_name ON book_cache(book_name_normalized);
+    CREATE INDEX IF NOT EXISTS idx_book_cache_search_count ON book_cache(search_count DESC);
+  `);
+
+  await client.query(
+    "INSERT INTO migrations (name) VALUES ($1)",
+    [migrationName]
+  );
+  
+  console.log(`✅ [Database] تم إنشاء جدول book_cache بنجاح`);
+}
+
+// Migration to create user_subscriptions table
+async function createUserSubscriptionsTable(client: pg.PoolClient) {
+  const migrationName = "004_create_user_subscriptions_table";
+  
+  const result = await client.query(
+    "SELECT * FROM migrations WHERE name = $1",
+    [migrationName]
+  );
+
+  if (result.rows.length > 0) {
+    console.log(`⏭️ [Database] تم تنفيذ الهجرة بالفعل: ${migrationName}`);
+    return;
+  }
+
+  console.log(`⚙️ [Database] تنفيذ الهجرة: ${migrationName}`);
+
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS user_subscriptions (
+      id SERIAL PRIMARY KEY,
+      telegram_id BIGINT NOT NULL,
+      subscription_type VARCHAR(50) NOT NULL,
+      subscription_value VARCHAR(255) NOT NULL,
+      is_active BOOLEAN DEFAULT true,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (telegram_id, subscription_type, subscription_value)
+    )
+  `);
+
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS idx_user_subscriptions_telegram_id ON user_subscriptions(telegram_id);
+    CREATE INDEX IF NOT EXISTS idx_user_subscriptions_active ON user_subscriptions(is_active) WHERE is_active = true;
+  `);
+
+  await client.query(
+    "INSERT INTO migrations (name) VALUES ($1)",
+    [migrationName]
+  );
+  
+  console.log(`✅ [Database] تم إنشاء جدول user_subscriptions بنجاح`);
+}
+
 // Initialize database when pool is created
 (async () => {
   try {
@@ -209,6 +295,8 @@ async function createCoreTablesIfNotExist(client: pg.PoolClient) {
     const client = await sharedPool.connect();
     try {
       await createCoreTablesIfNotExist(client);
+      await createBookCacheTable(client);
+      await createUserSubscriptionsTable(client);
     } finally {
       client.release();
     }

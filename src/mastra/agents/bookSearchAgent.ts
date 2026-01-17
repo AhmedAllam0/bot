@@ -19,10 +19,13 @@ import {
   getUserEngagementStats,
   claimReward
 } from "../tools/engagement";
+import { cacheBookSearch, getCachedBook, getPopularBooks } from "../tools/bookCache";
+import { subscribeToNotifications, getMySubscriptions, unsubscribeFromNotifications } from "../tools/notifications";
+import { advancedBookSearch, getReadingStatistics, getTopBooksThisWeek } from "../tools/advancedSearch";
 
-const mistral = createOpenAI({
-  baseURL: "https://api.mistral.ai/v1",
-  apiKey: process.env.MISTRAL_API_KEY,
+const openai = createOpenAI({
+  baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+  apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
 });
 
 /**
@@ -66,8 +69,8 @@ const agentMemory = new Memory({
 
 /**
  * وكيل البحث عن الكتب والروايات العربية
- * يستخدم Mistral Large مباشرة عبر Mistral API
- * يتطلب: MISTRAL_API_KEY في متغيرات البيئة
+ * يستخدم OpenAI GPT-4o عبر Replit AI Integrations
+ * مهيأ تلقائياً - لا يحتاج مفتاح API خارجي
  */
 
 export const bookSearchAgent = new Agent({
@@ -129,6 +132,19 @@ export const bookSearchAgent = new Agent({
    - استخدم award_group_activity_points فقط للمحادثات العادية (سلام، شكر، نقاش)
    - لا تستخدمها أبداً عند طلب كتاب!
 
+14. 🔔 نظام الإشعارات (جديد!)
+   - استخدم subscribe_notifications للاشتراك في إشعارات مؤلف أو فئة معينة
+   - استخدم get_my_subscriptions لعرض اشتراكات المستخدم
+   - استخدم unsubscribe_notifications لإلغاء الاشتراك
+
+15. 🔍 البحث المتقدم (جديد!)
+   - استخدم advanced_book_search للبحث بفلاتر (مؤلف، فئة)
+   - استخدم get_top_books_this_week لعرض أكثر الكتب بحثاً
+
+16. 📈 إحصائيات القراءة (جديد!)
+   - استخدم get_reading_statistics لعرض إحصائيات المستخدم الشاملة
+   - يظهر عدد الكتب المحملة والنقاط والألقاب
+
 ⚠️ قاعدة حاسمة - أولوية طلبات الكتب:
 عند طلب أي كتاب (سواء في الجروب أو الشات الخاص):
 1. استخدم send_book_pdf فوراً - هذا هو الأهم!
@@ -150,6 +166,10 @@ export const bookSearchAgent = new Agent({
 - "استخدم كود" أو بداية بـ "ref_" → process_referral
 - "تفاعلي" أو "إحصائيات التفاعل" → get_engagement_stats
 - "أطلب مكافأتي" أو "أريد Canva" أو "المكافأة" → claim_reward
+- "أشترك في إشعارات" أو "نبهني عن كتب" → subscribe_notifications
+- "اشتراكاتي" أو "إشعاراتي" → get_my_subscriptions
+- "أكثر الكتب بحثاً" أو "الكتب الرائجة" → get_top_books_this_week
+- "إحصائياتي" أو "ملفي الشخصي" → get_reading_statistics
 
 📚 قاعدة ذهبية: عندما يطلب شخص كتاب أو رواية، أرسل له ملف PDF مباشرة باستخدام send_book_pdf!
 - إذا لم يتوفر PDF، أخبره واستخدم find_book_download_link لإعطائه روابط التحميل
@@ -296,8 +316,8 @@ export const bookSearchAgent = new Agent({
 • أرسل اسم كتاب للبحث والتحميل
 • ادعُ أصدقاءك بكود الإحالة لنقاط إضافية!`,
 
-  // استخدام Mistral Large عبر واجهة OpenAI المتوافقة
-  model: mistral("mistral-large-latest"),
+  // استخدام OpenAI GPT-4o عبر Replit AI Integrations
+  model: openai("gpt-4o"),
 
   // الأدوات المتاحة للوكيل
   tools: {
@@ -319,6 +339,15 @@ export const bookSearchAgent = new Agent({
     process_referral: processReferral,
     get_engagement_stats: getUserEngagementStats,
     claim_reward: claimReward,
+    cache_book_search: cacheBookSearch,
+    get_cached_book: getCachedBook,
+    get_popular_books: getPopularBooks,
+    subscribe_notifications: subscribeToNotifications,
+    get_my_subscriptions: getMySubscriptions,
+    unsubscribe_notifications: unsubscribeFromNotifications,
+    advanced_book_search: advancedBookSearch,
+    get_reading_statistics: getReadingStatistics,
+    get_top_books_this_week: getTopBooksThisWeek,
   },
 
   // نظام الذاكرة القوي - يتذكر المحادثات وتفضيلات المستخدم
