@@ -177,6 +177,16 @@ export const mastra = new Mastra({
     ],
     apiRoutes: [
       // ======================================================================
+      // Health Check Endpoint for Cloud Run
+      // ======================================================================
+      {
+        path: "/",
+        method: "GET",
+        createHandler: async () => async (c: any) => {
+          return c.json({ status: "ok", service: "خلاصة الكتب Bot" }, 200);
+        },
+      },
+      // ======================================================================
       // Inngest Integration Endpoint
       // ======================================================================
       // Integrates Mastra workflows with Inngest for event-driven execution via inngest functions.
