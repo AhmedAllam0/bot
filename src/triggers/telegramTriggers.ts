@@ -37,6 +37,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 
 import { registerApiRoute } from "../mastra/inngest";
 import { Mastra } from "@mastra/core";
+import { checkRateLimit, getRateLimitMessage } from "../mastra/utils/rateLimiter";
 
 if (!process.env.TELEGRAM_BOT_TOKEN) {
   console.warn(
@@ -126,6 +127,28 @@ export function registerTelegramTrigger({
           const chatId = String(message.chat?.id || "");
           if (ADMIN_GROUP_IDS.includes(chatId)) {
             logger?.debug("⏭️ [Telegram] تجاهل رسالة من جروب إداري:", chatId);
+            return c.text("OK", 200);
+          }
+
+          // فحص Rate Limiting لمنع السبام
+          const rateCheck = checkRateLimit(userId, "message");
+          if (!rateCheck.allowed) {
+            logger?.warn("⚠️ [Telegram] تجاوز حد الرسائل:", { userId, resetIn: rateCheck.resetIn });
+            
+            // إرسال رسالة تحذير للمستخدم
+            try {
+              await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  chat_id: chatId,
+                  text: getRateLimitMessage(rateCheck.resetIn),
+                }),
+              });
+            } catch (e) {
+              logger?.debug("⚠️ [Telegram] فشل إرسال رسالة تحذير Rate Limit");
+            }
+            
             return c.text("OK", 200);
           }
 
